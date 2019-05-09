@@ -17,6 +17,7 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
+import torch
 import copy
 import json
 import logging
@@ -28,7 +29,7 @@ import tempfile
 import sys
 from io import open
 
-import torch
+#import torch
 from torch import nn
 from torch.nn import CrossEntropyLoss
 
@@ -224,11 +225,11 @@ class BertConfig(object):
         with open(json_file_path, "w", encoding='utf-8') as writer:
             writer.write(self.to_json_string())
 
-try:
-    from apex.normalization.fused_layer_norm import FusedLayerNorm as BertLayerNorm
-except ImportError:
-    logger.info("Better speed can be achieved with apex installed from https://www.github.com/nvidia/apex .")
-    class BertLayerNorm(nn.Module):
+#try:
+#    from apex.normalization.fused_layer_norm import FusedLayerNorm as BertLayerNorm
+#except ImportError:
+    #logger.info("Better speed can be achieved with apex installed from https://www.github.com/nvidia/apex .")
+class BertLayerNorm(nn.Module):
         def __init__(self, hidden_size, eps=1e-12):
             """Construct a layernorm module in the TF style (epsilon inside the square root).
             """
