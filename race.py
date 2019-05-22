@@ -358,7 +358,7 @@ def main():
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+        pass #raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
@@ -499,7 +499,12 @@ def main():
         model = BertForMultipleChoice.from_pretrained(args.output_dir, num_choices=4)
         tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
     else:
-        model = BertForMultipleChoice.from_pretrained(args.bert_model, num_choices=4)
+        output_model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
+
+        print("Load the model from",output_model_file)
+        # Load a trained model and vocabulary that you have fine-tuned
+        model = BertForMultipleChoice.from_pretrained(args.output_dir, num_choices=4)
+        tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
     model.to(device)
 
 
@@ -518,7 +523,7 @@ def main():
         # Run prediction for full data
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
-
+        tr_loss = 0
         model.eval()
         eval_loss, eval_accuracy = 0, 0
         nb_eval_steps, nb_eval_examples = 0, 0
@@ -546,9 +551,10 @@ def main():
         eval_accuracy = eval_accuracy / nb_eval_examples
 
         result = {'eval_loss': eval_loss,
-                  'eval_accuracy': eval_accuracy,
-                  'global_step': global_step,
-                  'loss': tr_loss/global_step}
+                  'eval_accuracy': eval_accuracy
+                 # 'global_step': global_step,
+                 # 'loss': tr_loss/global_step
+                 }
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
         with open(output_eval_file, "w") as writer:
