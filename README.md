@@ -10,3 +10,7 @@ We are going to explore the multiple choice reading comprehension with bert base
 2) cd bert-race
 3) uncompress race dataset under bert-race  
 4) ./run.sh   # you could add --do_eval and other parameters.
+
+### run base model in gcloud with K80. It took 28 hours to complete 2 epoches with 1e-5 learning rate.
+
+
