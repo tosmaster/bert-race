@@ -325,6 +325,302 @@ class BertSelfAttention(nn.Module):
         context_layer = context_layer.view(*new_context_layer_shape)
         return context_layer
 
+class BertDeSelfOutput(nn.Module):
+    def __init__(self, config):
+        super(BertDeSelfOutput, self).__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.qdense = nn.Linear(config.hidden_size, config.hidden_size)
+        self.qLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.qdropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, chidden_states,qhidden_states, ahidden_states,cinput_tensor,qinput_tensor,ainput_tensor):
+        chidden_states = self.dense(chidden_states)
+        chidden_states = self.dropout(chidden_states)
+        chidden_states = self.LayerNorm(chidden_states + cinput_tensor)
+
+        qhidden_states = self.qdense(qhidden_states)
+        qhidden_states = self.qdropout(qhidden_states)
+        qhidden_states = self.qLayerNorm(qhidden_states + qinput_tensor)
+
+        ahidden_states = self.qdense(qhidden_states)
+        ahidden_states = self.qdropout(qhidden_states)
+        ahidden_states = self.qLayerNorm(ahidden_states + ainput_tensor)
+
+        return chidden_states,qhidden_states,ahidden_states
+
+class BertDeAttention(nn.Module):
+    def __init__(self, config):
+        super(BertDeAttention, self).__init__()
+        self.self = BertMultiAttention(config)
+        self.output = BertDeSelfOutput(config) #Can use De here
+
+    def forward(self, cinput_tensor,qinput_tensor,ainput_tensor,attention_mask, qattention_mask,aattention_mask):
+        cself_output,qself_output,aself_output = self.self(cinput_tensor,qinput_tensor,ainput_tensor,attention_mask,qattention_mask,aattention_mask)
+        cattention_output,qattention_output,aattention_output = self.output(cself_output,qself_output,aself_output,cinput_tensor,qinput_tensor,ainput_tensor)
+
+        return cattention_output,qattention_output,aattention_output
+
+class BertDeIntermediate(nn.Module):
+    def __init__(self, config):
+        super(BertDeIntermediate, self).__init__()
+        self.dense = nn.Linear(config.hidden_size, config.intermediate_size)
+        self.qdense = nn.Linear(config.hidden_size, config.intermediate_size)
+
+        self.intermediate_act_fn = ACT2FN[config.hidden_act] \
+            if isinstance(config.hidden_act, str) else config.hidden_act
+
+    def forward(self, chidden_states,qhidden_states,ahidden_states):
+        #print('In DeIntermediate -dim of chidden_states is',chidden_states.size())
+        chidden_states = self.dense(chidden_states)
+        chidden_states = self.intermediate_act_fn(chidden_states)
+
+        qhidden_states = self.qdense(qhidden_states)
+        qhidden_states = self.intermediate_act_fn(qhidden_states)
+
+        ahidden_states = self.qdense(ahidden_states)
+        ahidden_states = self.intermediate_act_fn(ahidden_states)
+
+        return chidden_states,qhidden_states,ahidden_states
+
+class BertDeOutput(nn.Module):
+    def __init__(self, config):
+        super(BertDeOutput, self).__init__()
+        self.dense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.LayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.qdense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.qLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.qdropout = nn.Dropout(config.hidden_dropout_prob)
+
+        self.adense = nn.Linear(config.intermediate_size, config.hidden_size)
+        self.aLayerNorm = BertLayerNorm(config.hidden_size, eps=1e-12)
+        self.adropout = nn.Dropout(config.hidden_dropout_prob)
+
+    def forward(self, chidden_states,qhidden_states,ahidden_states,cinput_tensor,qinput_tensor,ainput_tensor):
+
+        #print('In BertDeOutput - size of chidden_states is',chidden_states.size())
+        chidden_states = self.dense(chidden_states)
+        chidden_states = self.dropout(chidden_states)
+        chidden_states = self.LayerNorm(chidden_states + cinput_tensor)
+
+        qhidden_states = self.qdense(qhidden_states)
+        qhidden_states = self.qdropout(qhidden_states)
+        qhidden_states = self.qLayerNorm(qhidden_states + qinput_tensor)
+
+        ahidden_states = self.adense(ahidden_states)
+        ahidden_states = self.adropout(ahidden_states)
+        ahidden_states = self.aLayerNorm(ahidden_states + ainput_tensor)
+
+        return chidden_states,qhidden_states,ahidden_states
+
+
+class BertDeLayer(nn.Module):
+    def __init__(self, config):
+        super(BertDeLayer, self).__init__()
+        self.attention = BertDeAttention(config)
+        self.intermediate = BertDeIntermediate(config)
+        self.output = BertDeOutput(config)
+
+    def forward(self, chidden_states,qhidden_states,ahidden_states, attention_mask,qattention_mask,aattention_mask):
+        #Calculate Masks to make it dedicated C and Q vectors respectively -- This is done to calculate C2Q and Q2C vectors
+        tmp_attention_mask = ((attention_mask + 10000.0)/10000.0)
+        tmp_qattention_mask = ((qattention_mask + 10000.0)/10000.0)
+        tmp_aattention_mask = ((aattention_mask + 10000.0)/10000.0)
+
+        #print("BertDeLayer",tmp_attention_mask.shape,chidden_states.shape)
+        tmp_attention_mask = tmp_attention_mask.squeeze(1).contiguous()
+        tmp_attention_mask = tmp_attention_mask.permute(0,2,1).contiguous()
+
+
+        tmp_qattention_mask = tmp_qattention_mask.squeeze(1).contiguous()
+        tmp_qattention_mask = tmp_qattention_mask.permute(0,2,1).contiguous()
+
+
+        tmp_aattention_mask = tmp_aattention_mask.squeeze(1).contiguous()
+        tmp_aattention_mask = tmp_aattention_mask.permute(0,2,1).contiguous()
+
+        chidden_states = tmp_attention_mask * chidden_states
+        qhidden_states = tmp_qattention_mask * qhidden_states
+        ahidden_states = tmp_qattention_mask * ahidden_states
+
+        cattention_output,qattention_output,aattention_output = self.attention(chidden_states,qhidden_states,ahidden_states,attention_mask,qattention_mask,aattention_mask)
+        cintermediate_output,qintermediate_output,a_output = self.intermediate(cattention_output,qattention_output,aattention_output)
+        clayer_output,qlayer_output,alayer_output = self.output(cintermediate_output,qintermediate_output,a_output,cattention_output,qattention_output,aattention_output)
+        return clayer_output,qlayer_output,alayer_output
+
+class BertDirectedAttention(nn.Module):
+    def __init__(self, config):
+        super(BertDirectedAttention, self).__init__()
+        layer = BertDeLayer(config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(5)])
+
+    def forward(self, hidden_states, cattention_mask, qattention_mask,aattention_mask,output_all_deencoded_layers=True):
+        call_deencoder_layers = []
+        qall_deencoder_layers = []
+        aall_deencoder_layers = []
+
+        chidden_states = hidden_states
+        qhidden_states = hidden_states
+        ahidden_states = hidden_states
+
+        for layer_module in self.layer:
+            chidden_states,qhidden_states,ahidden_states = layer_module(chidden_states,qhidden_states,ahidden_states,cattention_mask,qattention_mask,aattention_mask)
+            if output_all_deencoded_layers:
+                call_deencoder_layers.append(chidden_states)
+                qall_deencoder_layers.append(qhidden_states)
+                aall_deencoder_layers.append(qhidden_states)
+
+        if not output_all_deencoded_layers:
+            call_deencoder_layers.append(chidden_states)
+            qall_deencoder_layers.append(qhidden_states)
+            aall_deencoder_layers.append(qhidden_states)
+
+        return call_deencoder_layers,qall_deencoder_layers,aall_deencoder_layers
+
+
+
+class BertMultiAttention(nn.Module):
+    def __init__(self, config):
+        super(BertMultiAttention, self).__init__()
+        if config.hidden_size % config.num_attention_heads != 0:
+            raise ValueError(
+                "The hidden size (%d) is not a multiple of the number of attention "
+                "heads (%d)" % (config.hidden_size, config.num_attention_heads))
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+
+        #print('config.hidden_size is',config.hidden_size)
+
+        self.query = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.query.weight)
+        self.key = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.key.weight)
+        self.value = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.value.weight)
+
+
+        self.qquery = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.qquery.weight)
+        self.qkey = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.qkey.weight)
+        self.qvalue = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.qvalue.weight)
+
+
+        self.query_n = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.query_n.weight)
+        self.key_n = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.key_n.weight)
+        self.value_n = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.value_n.weight)
+
+        self.aquery = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.aquery.weight)
+        self.akey = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.akey.weight)
+        self.avalue = nn.Linear(config.hidden_size, self.all_head_size)
+        torch.nn.init.xavier_uniform_(self.avalue.weight)
+
+
+        self.cdropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.qdropout = nn.Dropout(config.attention_probs_dropout_prob)
+        self.adropout = nn.Dropout(config.attention_probs_dropout_prob)
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
+   #NOTE -
+    # 1. enc_hidden_states is context embeddings
+    # 2. dec_hidden_states is question embeddings
+    # start expt with query from dec_hidden_states
+    # key and value from context
+
+    def forward(self, enc_hidden_states,dec_hidden_states, a_hidden_states, attention_mask,qattention_mask,aattention_mask):
+        #--- Q2C
+        #print('forward of decoder')
+        #print('shape of dec_hidden_states is',dec_hidden_states.shape)
+        #print('size of self.all_head_size is',self.all_head_size)
+        mixed_query_layer = self.query(dec_hidden_states)
+        mixed_key_layer = self.key(enc_hidden_states)
+        mixed_value_layer = self.value(enc_hidden_states)
+
+        query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(mixed_key_layer)
+        value_layer = self.transpose_for_scores(mixed_value_layer)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
+        attention_scores = attention_scores / math.sqrt(self.attention_head_size)
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores = attention_scores + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs = nn.Softmax(dim=-1)(attention_scores)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs = self.cdropout(attention_probs)
+        context_layer = torch.matmul(attention_probs, value_layer)
+        context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
+        context_layer = context_layer.view(*new_context_layer_shape)
+
+
+        #--- C2Q 
+
+
+        q_layer = torch.matmul(attention_probs, query_layer)
+        q_layer = q_layer.permute(0, 2, 1, 3).contiguous()
+        new_q_layer_shape = q_layer.size()[:-2] + (self.all_head_size,)
+        q_layer = q_layer.view(*new_q_layer_shape)
+
+
+        #--- A2C
+
+        # Add Context and answer attention
+        mixed_query_layer_n = self.query_n(dec_hidden_states)
+        mixed_key_layer_n = self.key_n(a_hidden_states)
+        mixed_value_layer_n = self.value_n(a_hidden_states)
+
+        query_layer_n = self.transpose_for_scores(mixed_query_layer_n)
+        key_layer_n = self.transpose_for_scores(mixed_key_layer_n)
+        value_layer_n = self.transpose_for_scores(mixed_value_layer_n)
+
+        # Take the dot product between "query" and "key" to get the raw attention scores.
+        attention_scores_n = torch.matmul(query_layer_n, key_layer_n.transpose(-1, -2))
+        attention_scores_n = attention_scores_n / math.sqrt(self.attention_head_size)
+        # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+        attention_scores_n = attention_scores_n + attention_mask
+
+        # Normalize the attention scores to probabilities.
+        attention_probs_n = nn.Softmax(dim=-1)(attention_scores_n)
+
+        # This is actually dropping out entire tokens to attend to, which might
+        # seem a bit unusual, but is taken from the original Transformer paper.
+        attention_probs_n = self.cdropout(attention_probs_n)
+        context_layer_n = torch.matmul(attention_probs_n, value_layer_n)
+        context_layer_n = context_layer_n.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape_n = context_layer_n.size()[:-2] + (self.all_head_size,)
+        context_layer_n = context_layer_n.view(*new_context_layer_shape_n)
+
+        #--- C2A 
+
+        a_layer = torch.matmul(attention_probs_n, query_layer_n)
+        a_layer = a_layer.permute(0, 2, 1, 3).contiguous()
+        new_a_layer_shape = a_layer.size()[:-2] + (self.all_head_size,)
+        a_layer = a_layer.view(*new_a_layer_shape)
+
+
+        return context_layer+context_layer_n,q_layer,a_layer
+
 
 class BertSelfOutput(nn.Module):
     def __init__(self, config):
@@ -393,6 +689,23 @@ class BertLayer(nn.Module):
         intermediate_output = self.intermediate(attention_output)
         layer_output = self.output(intermediate_output, attention_output)
         return layer_output
+
+class BertSkipEncoder(nn.Module):
+    def __init__(self, config):
+        super(BertSkipEncoder, self).__init__()
+        layer = BertLayer(config)
+        self.layer = nn.ModuleList([copy.deepcopy(layer) for _ in range(1)])
+
+    def forward(self, hidden_states, attention_mask, output_all_encoded_layers=True):
+        all_encoder_layers = []
+        for layer_module in self.layer:
+            hidden_states = layer_module(hidden_states, attention_mask)
+            #print('size of hidden_states in BertEncoder is',hidden_states.shape)
+            if output_all_encoded_layers:
+                all_encoder_layers.append(hidden_states)
+        if not output_all_encoded_layers:
+            all_encoder_layers.append(hidden_states)
+        return all_encoder_layers
 
 
 class BertEncoder(nn.Module):
@@ -713,6 +1026,17 @@ class BertModel(BertPreTrainedModel):
         if token_type_ids is None:
             token_type_ids = torch.zeros_like(input_ids)
 
+        P_att = torch.zeros_like(input_ids)
+        Q_att = torch.zeros_like(input_ids)
+        A_att = torch.zeros_like(input_ids)
+        token_ids = torch.zeros_like(input_ids)
+
+        P_att[token_type_ids==0] = 1
+        Q_att[token_type_ids==1] = 1
+        A_att[token_type_ids==2] = 1
+
+        token_ids[token_type_ids > 0] = 1
+
         # We create a 3D attention mask from a 2D tensor mask.
         # Sizes are [batch_size, 1, 1, to_seq_length]
         # So we can broadcast to [batch_size, num_heads, from_seq_length, to_seq_length]
@@ -728,15 +1052,29 @@ class BertModel(BertPreTrainedModel):
         extended_attention_mask = extended_attention_mask.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
 
-        embedding_output = self.embeddings(input_ids, token_type_ids)
+        P_att = P_att.unsqueeze(1).unsqueeze(2)
+        P_att = P_att.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
+        P_att = (1.0 - P_att) * -10000.0
+
+        Q_att = Q_att.unsqueeze(1).unsqueeze(2)
+        Q_att = Q_att.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
+        Q_att = (1.0 - Q_att) * -10000.0
+
+        A_att = A_att.unsqueeze(1).unsqueeze(2)
+        A_att = A_att.to(dtype=next(self.parameters()).dtype) # fp16 compatibility
+        A_att = (1.0 - A_att) * -10000.0
+
+        embedding_output = self.embeddings(input_ids, token_ids)
         encoded_layers = self.encoder(embedding_output,
                                       extended_attention_mask,
                                       output_all_encoded_layers=output_all_encoded_layers)
+
         sequence_output = encoded_layers[-1]
         pooled_output = self.pooler(sequence_output)
         if not output_all_encoded_layers:
             encoded_layers = encoded_layers[-1]
-        return encoded_layers, pooled_output
+
+        return extended_attention_mask,P_att,Q_att,A_att,sequence_output
 
 
 class BertForPreTraining(BertPreTrainedModel):
@@ -1047,17 +1385,87 @@ class BertForMultipleChoice(BertPreTrainedModel):
         super(BertForMultipleChoice, self).__init__(config)
         self.num_choices = num_choices
         self.bert = BertModel(config)
-        self.dropout = nn.Dropout(config.hidden_dropout_prob)
-        self.classifier = nn.Linear(config.hidden_size, 1)
+        self.dropout = nn.Dropout(config.hidden_dropout_prob*4)
+        self.pooler = BertPooler(config)
+        self.classifier = nn.Linear(config.hidden_size*4, 1)
         self.apply(self.init_bert_weights)
+        self.decoder = BertDirectedAttention(config)
+
+        self.num_attention_heads = config.num_attention_heads
+        self.attention_head_size = int(config.hidden_size / config.num_attention_heads)
+        self.all_head_size = self.num_attention_heads * self.attention_head_size
+
+
+        self.LayerNorm = BertLayerNorm(config.hidden_size*4, eps=1e-12)
+        self.spa = nn.Linear(config.hidden_size*2, self.all_head_size)
+        self.sa = nn.Linear(config.hidden_size*2, self.all_head_size)
+        self.spq = nn.Linear(config.hidden_size*2, self.all_head_size)
+        self.sq = nn.Linear(config.hidden_size*2, self.all_head_size)
+        self.activate = ACT2FN[config.hidden_act]
+        self.maxpool = nn.AdaptiveMaxPool1d(1)
+        self.dense = nn.Linear(config.hidden_size*4, self.all_head_size)
+
 
     def forward(self, input_ids, token_type_ids=None, attention_mask=None, labels=None):
         flat_input_ids = input_ids.view(-1, input_ids.size(-1))
         flat_token_type_ids = token_type_ids.view(-1, token_type_ids.size(-1)) if token_type_ids is not None else None
         flat_attention_mask = attention_mask.view(-1, attention_mask.size(-1)) if attention_mask is not None else None
-        _, pooled_output = self.bert(flat_input_ids, flat_token_type_ids, flat_attention_mask, output_all_encoded_layers=False)
-        pooled_output = self.dropout(pooled_output)
+
+        #_, pooled_output = self.bert(flat_input_ids, flat_token_type_ids, flat_attention_mask, output_all_encoded_layers=False)
+
+        extended_attention_mask,c_attention_mask,q_attention_mask,a_attention_mask,sequence_output = self.bert(flat_input_ids, flat_token_type_ids, flat_attention_mask, output_all_encoded_layers=False)
+
+        cdeencoded_layers,qdeencoded_layers,adeencoded_layers = self.decoder(sequence_output, #2d --> 1d translated
+                                      c_attention_mask,q_attention_mask,a_attention_mask,
+                                      output_all_deencoded_layers=True)
+
+        #Pick final C2Q and Q2C embedding vectors for the batch
+        Mp = cdeencoded_layers[-1]
+        Mq = qdeencoded_layers[-1]
+        Ma = adeencoded_layers[-1]
+
+        passage = cdeencoded_layers[-2]
+        question = qdeencoded_layers[-2]
+        answer = adeencoded_layers[-2]
+
+        Sp_temp = torch.cat((Mp - answer,Mp * answer),-1)
+        #print(Sp_temp.shape,Mpa.shape,answer.shape)
+        Spa = self.activate(self.spa(Sp_temp))
+        Sa_temp = torch.cat((Ma - passage,Ma * passage),-1)
+        Sa = self.activate(self.sa(Sa_temp))
+
+
+        Sp_temp = torch.cat((Mq - question,Mq * question),-1)
+        Spq = self.activate(self.spq(Sp_temp))
+        Sq_temp = torch.cat((Mp - passage,Mp * passage),-1)
+        Sq = self.activate(self.sq(Sq_temp))
+
+        # Do wise-element max pooling in the last layer sequence domantion\
+        Spa = Spa.transpose(-1,-2)
+        Sa  = Sa.transpose(-1,-2)
+        Spq = Spq.transpose(-1,-2)
+        Sq  = Sq.transpose(-1,-2)
+
+        #print("before",Spa.shape,Sa.shape,Spq.shape,Sq.shape)
+        Cpa = self.maxpool(Spa)
+        Ca = self.maxpool(Sa)
+        Cpq = self.maxpool(Spq)
+        Cq = self.maxpool(Sq)
+
+        Spa = Spa.transpose(-1,-2)
+        Sa  = Sa.transpose(-1,-2)
+        Spq = Spq.transpose(-1,-2)
+        Sq  = Sq.transpose(-1,-2)
+
+        C = torch.cat((Cpa,Ca,Cpq,Cq),1).squeeze()
+
+        #Skip connection from Bert Layer
+        sequence_output1d = self.LayerNorm(C)
+        #output = self.pooler(sequence_output1d)
+        pooled_output = self.dropout(sequence_output1d)
+
         logits = self.classifier(pooled_output)
+        #print("###",sequence_output1d.shape,sequence_output.shape,logits.shape)
         reshaped_logits = logits.view(-1, self.num_choices)
 
         if labels is not None:

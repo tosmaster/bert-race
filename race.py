@@ -126,6 +126,7 @@ def read_race(input_dir, data_grade = ["high","middle"]):
             questions = sample['questions']
             options = sample['options']
             rid = file_name[:-4] 
+            #print(file_name)
             for i in range(len(answers)):
             	samples.append(Race(
 	    		race_id = rid+":"+str(i),
@@ -179,7 +180,7 @@ def convert_examples_to_features(examples, tokenizer, max_seq_length,
             _truncate_seq_pair(context_tokens_choice, ending_tokens, max_seq_length - 3)
 
             tokens = ["[CLS]"] + context_tokens_choice + ["[SEP]"] + ending_tokens + ["[SEP]"]
-            segment_ids = [0] * (len(context_tokens_choice) + 2) + [1] * (len(ending_tokens) + 1)
+            segment_ids = [0] * (len(context_tokens_choice) + 2) + [1] * (len(start_ending_tokens)) +[2] * (len(tokenizer.tokenize(ending)) + 1)
 
             input_ids = tokenizer.convert_tokens_to_ids(tokens)
             input_mask = [1] * len(input_ids)
@@ -237,6 +238,7 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
 
 def accuracy(out, labels):
     outputs = np.argmax(out, axis=1)
+    #print(outputs,outputs == labels)
     return np.sum(outputs == labels)
 
 def select_field(features, field):
@@ -357,8 +359,9 @@ def main():
     if not args.do_train and not args.do_eval:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
+    #print(args.output_dir)
     if os.path.exists(args.output_dir) and os.listdir(args.output_dir):
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
+        ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
@@ -391,6 +394,19 @@ def main():
     elif n_gpu > 1:
         model = torch.nn.DataParallel(model)
 
+    #Freeze the embedding network and encoder layers
+    print("Freeze network")
+    for name, param in model.named_parameters():
+        ln = 24
+        if name.startswith('bert.encoder'):
+        	l = name.split('.')
+        	ln = int(l[3])
+      
+        if name.startswith('bert.embeddings') or ln < 0:
+        	print(name)  
+        	param.requires_grad = False
+
+
     # Prepare optimizer
     param_optimizer = list(model.named_parameters())
 
@@ -403,31 +419,34 @@ def main():
         {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)], 'weight_decay': 0.01},
         {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
-    if args.fp16:
-        try:
-            from apex.optimizers import FP16_Optimizer
-            from apex.optimizers import FusedAdam
-        except ImportError:
-            raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+    
 
-        optimizer = FusedAdam(optimizer_grouped_parameters,
+    global_step = 0
+    if args.do_train:
+
+        if args.fp16:
+        	try:
+            		from apex.optimizers import FP16_Optimizer
+            		from apex.optimizers import FusedAdam
+        	except ImportError:
+            		raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use distributed and fp16 training.")
+
+        	optimizer = FusedAdam(optimizer_grouped_parameters,
                               lr=args.learning_rate,
                               bias_correction=False,
                               max_grad_norm=1.0)
-        if args.loss_scale == 0:
-            optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
-        else:
-            optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
-        warmup_linear = WarmupLinearSchedule(warmup=args.warmup_proportion,
+        	if args.loss_scale == 0:
+            		optimizer = FP16_Optimizer(optimizer, dynamic_loss_scale=True)
+        	else:
+            		optimizer = FP16_Optimizer(optimizer, static_loss_scale=args.loss_scale)
+        	warmup_linear = WarmupLinearSchedule(warmup=args.warmup_proportion,
                                              t_total=num_train_optimization_steps)
-    else:
-        optimizer = BertAdam(optimizer_grouped_parameters,
+        else:
+        	optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.learning_rate,
                              warmup=args.warmup_proportion,
                              t_total=num_train_optimization_steps)
 
-    global_step = 0
-    if args.do_train:
         train_features = convert_examples_to_features(
             train_examples, tokenizer, args.max_seq_length, True)
         logger.info("***** Running training *****")
@@ -446,8 +465,15 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         model.train()
+
+        output_train_file = os.path.join(args.output_dir, "train_results.txt")        
+        loss_writer = open(output_train_file, "w",1)
+
         for _ in trange(int(args.num_train_epochs), desc="Epoch"):
+
             tr_loss = 0
+            last_tr_loss = 0
+
             nb_tr_examples, nb_tr_steps = 0, 0
             for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
                 batch = tuple(t.to(device) for t in batch)
@@ -469,6 +495,7 @@ def main():
                     optimizer.backward(loss)
                 else:
                     loss.backward()
+
                 if (step + 1) % args.gradient_accumulation_steps == 0:
                     if args.fp16:
                         # modify learning rate with special warm up BERT uses
@@ -481,7 +508,11 @@ def main():
                     optimizer.zero_grad()
                     global_step += 1
 
-
+                if nb_tr_examples % 512 == 0:
+                    loss_log = (tr_loss - last_tr_loss)*1.0/512
+                    print(nb_tr_examples,loss_log)
+                    loss_writer.write("%d %f \n" % (nb_tr_examples,loss_log))
+                    last_tr_loss = tr_loss
 
     if args.do_train:
         # Save a trained model, configuration and tokenizer
@@ -499,7 +530,9 @@ def main():
         model = BertForMultipleChoice.from_pretrained(args.output_dir, num_choices=4)
         tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
     else:
-        model = BertForMultipleChoice.from_pretrained(args.bert_model, num_choices=4)
+        output_model_file = os.path.join(args.output_dir, WEIGHTS_NAME)
+        model = BertForMultipleChoice.from_pretrained(args.output_dir, num_choices=4)
+        tokenizer = BertTokenizer.from_pretrained(args.output_dir, do_lower_case=args.do_lower_case)
     model.to(device)
 
 
@@ -513,6 +546,7 @@ def main():
         all_input_ids = torch.tensor(select_field(eval_features, 'input_ids'), dtype=torch.long)
         all_input_mask = torch.tensor(select_field(eval_features, 'input_mask'), dtype=torch.long)
         all_segment_ids = torch.tensor(select_field(eval_features, 'segment_ids'), dtype=torch.long)
+
         all_label = torch.tensor([f.label for f in eval_features], dtype=torch.long)
         eval_data = TensorDataset(all_input_ids, all_input_mask, all_segment_ids, all_label)
         # Run prediction for full data
@@ -520,6 +554,7 @@ def main():
         eval_dataloader = DataLoader(eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
         model.eval()
+        tr_loss = 0
         eval_loss, eval_accuracy = 0, 0
         nb_eval_steps, nb_eval_examples = 0, 0
         for input_ids, input_mask, segment_ids, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
@@ -541,14 +576,13 @@ def main():
 
             nb_eval_examples += input_ids.size(0)
             nb_eval_steps += 1
+            
 
         eval_loss = eval_loss / nb_eval_steps
         eval_accuracy = eval_accuracy / nb_eval_examples
 
         result = {'eval_loss': eval_loss,
-                  'eval_accuracy': eval_accuracy,
-                  'global_step': global_step,
-                  'loss': tr_loss/global_step}
+                  'eval_accuracy': eval_accuracy}
 
         output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
         with open(output_eval_file, "w") as writer:

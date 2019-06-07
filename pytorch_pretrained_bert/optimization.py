@@ -35,13 +35,15 @@ else:
 class _LRSchedule(ABC):
     """ Parent of all LRSchedules here. """
     warn_t_total = False        # is set to True for schedules where progressing beyond t_total steps doesn't make sense
-    def __init__(self, warmup=0.002, t_total=-1, **kw):
+    def __init__(self, warmup=0.002, t_total = -1, **kw):
         """
         :param warmup:  what fraction of t_total steps will be used for linear warmup
         :param t_total: how many training steps (updates) are planned
         :param kw:
         """
+        print(t_total)
         super(_LRSchedule, self).__init__(**kw)
+        print(t_total)
         if t_total < 0:
             logger.warning("t_total value of {} results in schedule not being applied".format(t_total))
         if not 0.0 <= warmup < 1.0 and not warmup == -1:
