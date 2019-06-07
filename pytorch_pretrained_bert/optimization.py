@@ -43,7 +43,9 @@ class _LRSchedule(ABC):
         """
         print(t_total)
         super(_LRSchedule, self).__init__(**kw)
-        print(t_total)
+
+        if t_total == None: t_total = -1
+
         if t_total < 0:
             logger.warning("t_total value of {} results in schedule not being applied".format(t_total))
         if not 0.0 <= warmup < 1.0 and not warmup == -1:
