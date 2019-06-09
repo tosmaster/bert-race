@@ -1,9 +1,14 @@
 # bert-race
 We are going to explore the multiple choice reading comprehension with bert based on RACE dataset
 
+## How to install boto3 
+python -m pip install --user boto3
+
 ## Out of memory issue
-1) add --fp16 in run.sh. But this requires apex from nvidia. 
-2) choose small model like base. It could be running on 11GB size GPU.
+1) Add --fp16 in run.sh. But this requires apex from nvidia. 
+2) Choose small model like base. It could be running on 11GB size GPU.
+3) Tune freezed layers
+4) Use V100 in gcloud
 
 ## How to run bert-race
 1) git clone bert-race
