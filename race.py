@@ -117,6 +117,10 @@ def read_race(input_dir, data_grade = ["high","middle"]):
         dir_name = input_dir + '/' + grade + '/'
 
         files_list = glob.glob(dir_name + "*.txt")
+
+        files_list = sorted(files_list, key=lambda x: int((x.split('/')[-1]).split('.')[0]))
+        print("After sorted:",files_list[0])
+
         for file_name in files_list:
             f = open(file_name,'r',encoding='utf-8')
             
@@ -580,10 +584,11 @@ def main():
             nb_eval_steps += 1
             
             total_logits.append(logits)
-            total_labels.append(label_ids)	
+            total_labels.append(label_ids)
 	
         total_logits = np.concatenate(total_logits)
         total_labels = np.concatenate(total_labels)
+
         np.save(args.output_dir+"/logits.npy",total_logits)
         np.save(args.output_dir+"/labels.npy",total_labels)
 
