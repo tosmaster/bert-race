@@ -21,7 +21,7 @@ INPUT = "RACE" # the input directory
 OUTPUT = "EDA_M2" # the output directory
 NUM_AUG = 2 # number of augmented files to generate per randomly chosen file
 ALPHA = 0.1 # how much to change each sentence
-TOTAL = 2500 # total number of files to be augmented (to be added to dataset)
+TOTAL = 2000 # total number of files to be augmented (to be added to dataset)
 
 # read each file, copy NUM_AUG times, and replace article with eda
 def augment(path):
